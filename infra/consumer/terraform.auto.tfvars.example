@@ -1,0 +1,10 @@
+project_id        = "your-gcp-project-id"
+region            = "us-central1"
+job_name          = "codemender-worker-slim"
+runner_sa_name    = "codemender-slim-runner"
+image_uri         = "us-central1-docker.pkg.dev/your-gcp-project-id/codemender-workers/worker:slim"
+wiz_secret_name   = "wiz-mcp-config"
+github_repo       = "wiz-demo/talisman"
+wif_pool_name     = "codemender-pool"
+wif_provider_name = "github-provider"
+create_wif        = true

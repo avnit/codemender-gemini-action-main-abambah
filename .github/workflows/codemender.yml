@@ -1,0 +1,1044 @@
+name: "CodeMender Security Suite (Slim)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Operation to execute: 'scan', 'verify', or 'remediate'"
+        required: false
+        default: "remediate"
+        type: string
+      project-id:
+        description: "Google Cloud Project ID hosting Cloud Run Job"
+        required: true
+        type: string
+      region:
+        description: "Google Cloud Region for Cloud Run Job"
+        required: true
+        type: string
+      job-name:
+        description: "Cloud Run Job name"
+        required: false
+        default: "wiz-codemender-slim"
+        type: string
+      channel:
+        description: "Worker channel: 'stable' runs job-name; 'experimental' runs <job-name>-experimental"
+        required: false
+        default: "stable"
+        type: choice
+        options:
+          - stable
+          - experimental
+      experimental-job-name:
+        description: "Override the experimental Cloud Run Job name (default: <job-name>-experimental)"
+        required: false
+        default: ""
+        type: string
+      cm-model:
+        description: "Gemini Model for CodeMender"
+        required: false
+        default: "gemini-4-argon"
+        type: string
+      target-ref:
+        description: "Target branch or commit SHA"
+        required: false
+        default: ""
+        type: string
+      vuln-id:
+        description: "Finding or Vulnerability ID to remediate"
+        required: false
+        default: ""
+        type: string
+      wiz-secret-name:
+        description: "Secret Manager secret name for Wiz credentials"
+        required: false
+        default: "wiz-mcp-config"
+        type: string
+      stream-logs:
+        description: "Stream Cloud Run container execution logs in real-time"
+        required: false
+        default: false
+        type: boolean
+      additional-logging:
+        description: "Enable verbose debug logging, remediation guidance, and patch inspection"
+        required: false
+        default: false
+        type: boolean
+      mock-findings:
+        description: "🧪 Use fast synthetic mock findings and skip full scan/verify (testing only)"
+        required: false
+        default: false
+        type: boolean
+      wif-provider:
+        description: "Workload Identity Provider resource name"
+        required: false
+        default: ""
+        type: string
+      wif-service-account:
+        description: "Workload Identity Service Account email"
+        required: false
+        default: ""
+        type: string
+  workflow_call:
+    inputs:
+      action:
+        description: "Operation to execute: 'scan', 'verify', or 'remediate'"
+        required: false
+        default: "remediate"
+        type: string
+      project-id:
+        description: "Google Cloud Project ID hosting Cloud Run Job"
+        required: false
+        default: ""
+        type: string
+      region:
+        description: "Google Cloud Region for Cloud Run Job"
+        required: false
+        default: ""
+        type: string
+      job-name:
+        description: "Cloud Run Job name"
+        required: false
+        default: "wiz-codemender-slim"
+        type: string
+      channel:
+        description: "Worker channel: 'stable' runs job-name; 'experimental' runs <job-name>-experimental"
+        required: false
+        default: "stable"
+        type: string
+      experimental-job-name:
+        description: "Override the experimental Cloud Run Job name (default: <job-name>-experimental)"
+        required: false
+        default: ""
+        type: string
+      cm-model:
+        description: "Gemini Model for CodeMender"
+        required: false
+        default: "gemini-4-argon"
+        type: string
+      target-ref:
+        description: "Target branch or commit SHA"
+        required: false
+        default: ""
+        type: string
+      vuln-id:
+        description: "Finding or Vulnerability ID to remediate"
+        required: false
+        default: ""
+        type: string
+      wiz-secret-name:
+        description: "Secret Manager secret name for Wiz credentials"
+        required: false
+        default: "wiz-mcp-config"
+        type: string
+      stream-logs:
+        description: "Stream Cloud Run container execution logs in real-time"
+        required: false
+        default: false
+        type: boolean
+      additional-logging:
+        description: "Enable verbose debug logging, remediation guidance, and patch inspection"
+        required: false
+        default: false
+        type: boolean
+      mock-findings:
+        description: "🧪 Use fast synthetic mock findings and skip full scan/verify (testing only)"
+        required: false
+        default: false
+        type: boolean
+      wif-provider:
+        description: "Workload Identity Provider resource name"
+        required: false
+        default: ""
+        type: string
+      wif-service-account:
+        description: "Workload Identity Service Account email"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  run-slim-scan:
+    name: "CodeMender Security Scan"
+    if: inputs.action == 'scan'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.scan.outputs.matrix }}
+      count: ${{ steps.scan.outputs.count }}
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_SA_KEY == '' && (inputs.wif-provider || vars.WIF_PROVIDER || secrets.WIF_PROVIDER) || '' }}
+          service_account: ${{ secrets.GCP_SA_KEY == '' && (inputs.wif-service-account || vars.WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT) || '' }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ inputs.project-id }}
+          install_components: ${{ inputs.stream-logs && 'beta,log-streaming' || 'beta' }}
+
+      - name: Execute Discovery Scan & Extract Matrix
+        id: scan
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+          PROJECT: ${{ inputs.project-id || vars.GCP_PROJECT }}
+          REGION: ${{ inputs.region || vars.GCP_REGION || 'us-central1' }}
+          CHANNEL: ${{ inputs.channel || 'stable' }}
+          JOB_NAME: ${{ inputs.channel == 'experimental' && (inputs.experimental-job-name || format('{0}-experimental', inputs.job-name)) || inputs.job-name }}
+          REPO_NAME: ${{ github.repository }}
+          TARGET_REF: ${{ inputs.target-ref || github.head_ref || github.ref_name }}
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch || 'main' }}
+          CM_MODEL: ${{ inputs.cm-model }}
+          WIZ_SECRET: ${{ inputs.wiz-secret-name }}
+          CALLER_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+          STREAM_LOGS: ${{ inputs.stream-logs }}
+          ADDITIONAL_LOGGING: ${{ inputs.additional-logging }}
+          MOCK_FINDINGS: ${{ inputs.mock-findings }}
+        run: |
+          set -euo pipefail
+          LOG_LEVEL="INFO"
+          if [ "${ADDITIONAL_LOGGING}" = "true" ]; then
+            LOG_LEVEL="DEBUG"
+          fi
+
+          if [ "${CHANNEL}" != "stable" ] && [ "${CHANNEL}" != "experimental" ]; then
+            echo "::error::Invalid channel '${CHANNEL}' (expected stable|experimental)"; exit 1
+          fi
+          if ! gcloud run jobs describe "${JOB_NAME}" --project="${PROJECT}" --region="${REGION}" --format="value(metadata.name)" >/dev/null 2>&1; then
+            if [ "${CHANNEL}" = "experimental" ]; then
+              echo "::error::Experimental Cloud Run job '${JOB_NAME}' not found in ${PROJECT}/${REGION}. Create it once by cloning your stable job (README: 'Experimental worker channel')."
+            else
+              echo "::error::Cloud Run job '${JOB_NAME}' not found in ${PROJECT}/${REGION}. Check job-name/project-id/region or re-run setup.sh."
+            fi
+            exit 1
+          fi
+          echo "Using ${CHANNEL} worker job: ${JOB_NAME}"
+          echo "- Worker channel: \`${CHANNEL}\` (job \`${JOB_NAME}\`)" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::group::Triggering Cloud Run Scan Job Execution"
+          EXECUTION=$(gcloud run jobs execute "${JOB_NAME}" \
+            --project="${PROJECT}" \
+            --region="${REGION}" \
+            --async \
+            --format="value(metadata.name)" \
+            --args="REPO=${REPO_NAME},PROJECT_ID=${PROJECT},GCP_PROJECT=${PROJECT},REF=${TARGET_REF},BASE_REF=${BASE_REF},COMMAND=bash /entrypoint.sh,CM_ACTION=scan,MODE=fix,CM_MODEL=${CM_MODEL},WIZ_SECRET_NAME=${WIZ_SECRET},GITHUB_TOKEN=${CALLER_TOKEN},CM_DISABLE_SANDBOX=true,ADDITIONAL_LOGGING=${ADDITIONAL_LOGGING},LOG_LEVEL=${LOG_LEVEL},CM_MOCK_FINDINGS=${MOCK_FINDINGS}")
+          echo "Started Cloud Run scan execution: ${EXECUTION}"
+          echo "::endgroup::"
+
+          START_TIME=$(date +%s)
+          TAIL_PID=""
+          TAIL_ACTIVE=false
+          JOB_RUNNING="false"
+
+          if [ "${STREAM_LOGS}" = "true" ]; then
+            echo "Streaming Cloud Run logs for ${EXECUTION} (waiting for container initialization)..."
+            PYTHONUNBUFFERED=1 stdbuf -oL -eL gcloud beta run jobs executions logs tail "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" 2>&1 &
+            TAIL_PID=$!
+            TAIL_ACTIVE=true
+          else
+            echo "Log streaming disabled. Monitoring execution progress for ${EXECUTION}..."
+          fi
+
+          EXIT_CODE=0
+          LOOP_COUNT=0
+          while true; do
+            LOOP_COUNT=$((LOOP_COUNT + 1))
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
+
+            if [ "${TAIL_ACTIVE}" = "true" ] && [ -n "${TAIL_PID}" ] && ! kill -0 "${TAIL_PID}" 2>/dev/null; then
+              TAIL_ACTIVE=false
+              echo "[workflow] Log tailing process completed for ${EXECUTION}."
+            fi
+
+            DESC_JSON=$(gcloud run jobs executions describe "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" \
+              --format=json 2>/dev/null || echo "{}")
+            IS_DONE=$(echo "${DESC_JSON}" | jq -r '.status.conditions[]? | select(.type=="Completed") | .status // empty')
+            if [ "${IS_DONE}" = "True" ]; then
+              echo "Execution ${EXECUTION} completed successfully (${ELAPSED}s elapsed)."
+              break
+            elif [ "${IS_DONE}" = "False" ]; then
+              echo "Execution ${EXECUTION} failed (${ELAPSED}s elapsed)."
+              EXIT_CODE=1
+              break
+            fi
+
+            IS_RUNNING=$(echo "${DESC_JSON}" | jq -r '
+              if ((.status.runningCount // 0) > 0) or any(.status.conditions[]?; .type == "Completed" and (.reason == "TasksRunning" or .reason == "Running")) then
+                "true"
+              else
+                "false"
+              end
+            ')
+
+            if [ "${JOB_RUNNING}" != "true" ] && [ "${IS_RUNNING}" = "true" ]; then
+              JOB_RUNNING="true"
+              if [ "${STREAM_LOGS}" != "true" ]; then
+                echo "⏳ [Progress] Execution in progress... (${ELAPSED}s elapsed)"
+              else
+                echo "Cloud Run job is now running (${ELAPSED}s elapsed)."
+              fi
+            elif [ $((LOOP_COUNT % 3)) -eq 1 ]; then
+              if [ "${JOB_RUNNING}" = "true" ]; then
+                if [ "${STREAM_LOGS}" != "true" ]; then
+                  echo "⏳ [Progress] Execution in progress... (${ELAPSED}s elapsed)"
+                fi
+              else
+                echo "⏳ [Progress] Provisioning Cloud Run job... (${ELAPSED}s elapsed)"
+              fi
+            fi
+
+            sleep 5
+          done
+
+          if [ -n "${TAIL_PID}" ]; then
+            sleep 5
+            kill "${TAIL_PID}" 2>/dev/null || true
+            wait "${TAIL_PID}" 2>/dev/null || true
+          fi
+
+          if [ ${EXIT_CODE} -ne 0 ]; then
+            echo "::group::Failure Execution Logs"
+            gcloud beta run jobs executions logs read "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" --limit=200 2>&1 || true
+            echo "::endgroup::"
+            exit ${EXIT_CODE}
+          elif [ "${STREAM_LOGS}" != "true" ] && [ "${ADDITIONAL_LOGGING}" = "true" ]; then
+            echo "::group::Execution Logs"
+            gcloud beta run jobs executions logs read "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" --limit=200 2>&1 || true
+            echo "::endgroup::"
+          fi
+
+          echo "::group::Extracting Scan Context & Verification Matrix"
+          GCS_DIR="gs://${PROJECT}-codemender-artifacts/scans/${EXECUTION}"
+
+          if ! gcloud storage cp "${GCS_DIR}/matrix.json" ./matrix.json; then
+            echo "❌ Error: Scan artifacts not found in GCS at ${GCS_DIR}/matrix.json" >&2
+            exit 1
+          fi
+
+          MATRIX_JSON="$(cat ./matrix.json)"
+          COUNT="$(jq -r 'length' ./matrix.json 2>/dev/null || echo 0)"
+          WIZ_CTX_MD="$(gcloud storage cat "${GCS_DIR}/wiz_context.md" 2>/dev/null || echo "")"
+          gcloud storage rm -r "${GCS_DIR}" 2>/dev/null || true
+
+          if [ -n "${WIZ_CTX_MD}" ]; then
+            {
+              echo "## 🛡️ CodeMender Scan Context (Wiz Security Graph)"
+              echo ""
+              echo "${WIZ_CTX_MD}"
+              echo ""
+              echo "---"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+          echo "Discovered ${COUNT} candidate finding(s) from scan execution."
+          {
+            echo "count=${COUNT}"
+            echo "matrix<<EOF"
+            echo "${MATRIX_JSON}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### 📊 Scan Discovery Summary"
+            echo "- **Target Repository:** \`${REPO_NAME}\`"
+            echo "- **Target Ref:** \`${TARGET_REF}\`"
+            echo "- **Cloud Run Execution:** \`${EXECUTION}\`"
+            echo "- **Discovered Candidate Findings:** **${COUNT}**"
+            echo ""
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "::endgroup::"
+
+  run-slim-verify:
+    name: "Verify: ${{ matrix.candidate.short_id }} (${{ matrix.candidate.severity }})"
+    needs: run-slim-scan
+    if: |
+      always() &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled') &&
+      needs.run-slim-scan.outputs.count > 0
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        candidate: ${{ fromJson(needs.run-slim-scan.outputs.matrix || '[]') }}
+      max-parallel: 10
+      fail-fast: false
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_SA_KEY == '' && (inputs.wif-provider || vars.WIF_PROVIDER || secrets.WIF_PROVIDER) || '' }}
+          service_account: ${{ secrets.GCP_SA_KEY == '' && (inputs.wif-service-account || vars.WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT) || '' }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ inputs.project-id }}
+          install_components: ${{ inputs.stream-logs && 'beta,log-streaming' || 'beta' }}
+
+      - name: Execute Parallel Verification Job
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+          PROJECT: ${{ inputs.project-id || vars.GCP_PROJECT }}
+          REGION: ${{ inputs.region || vars.GCP_REGION || 'us-central1' }}
+          CHANNEL: ${{ inputs.channel || 'stable' }}
+          JOB_NAME: ${{ inputs.channel == 'experimental' && (inputs.experimental-job-name || format('{0}-experimental', inputs.job-name)) || inputs.job-name }}
+          REPO_NAME: ${{ github.repository }}
+          CM_MODEL: ${{ inputs.cm-model }}
+          WIZ_SECRET: ${{ inputs.wiz-secret-name }}
+          TARGET_REF: ${{ inputs.target-ref || github.head_ref || github.ref_name }}
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch || 'main' }}
+          CALLER_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+          CANDIDATE_ID: ${{ matrix.candidate.candidate_id }}
+          CANDIDATE_B64: ${{ matrix.candidate.candidate_json_b64 }}
+          STREAM_LOGS: ${{ inputs.stream-logs }}
+          ADDITIONAL_LOGGING: ${{ inputs.additional-logging }}
+          MOCK_FINDINGS: ${{ inputs.mock-findings }}
+        run: |
+          set -euo pipefail
+          LOG_LEVEL="INFO"
+          if [ "${ADDITIONAL_LOGGING}" = "true" ]; then
+            LOG_LEVEL="DEBUG"
+          fi
+
+          if [ "${CHANNEL}" != "stable" ] && [ "${CHANNEL}" != "experimental" ]; then
+            echo "::error::Invalid channel '${CHANNEL}' (expected stable|experimental)"; exit 1
+          fi
+          if ! gcloud run jobs describe "${JOB_NAME}" --project="${PROJECT}" --region="${REGION}" --format="value(metadata.name)" >/dev/null 2>&1; then
+            if [ "${CHANNEL}" = "experimental" ]; then
+              echo "::error::Experimental Cloud Run job '${JOB_NAME}' not found in ${PROJECT}/${REGION}. Create it once by cloning your stable job (README: 'Experimental worker channel')."
+            else
+              echo "::error::Cloud Run job '${JOB_NAME}' not found in ${PROJECT}/${REGION}. Check job-name/project-id/region or re-run setup.sh."
+            fi
+            exit 1
+          fi
+          echo "Using ${CHANNEL} worker job: ${JOB_NAME}"
+          echo "- Worker channel: \`${CHANNEL}\` (job \`${JOB_NAME}\`)" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::group::Triggering Cloud Run Verification Job Execution"
+          EXECUTION=$(gcloud run jobs execute "${JOB_NAME}" \
+            --project="${PROJECT}" \
+            --region="${REGION}" \
+            --async \
+            --format="value(metadata.name)" \
+            --args="REPO=${REPO_NAME},PROJECT_ID=${PROJECT},GCP_PROJECT=${PROJECT},REF=${TARGET_REF},BASE_REF=${BASE_REF},COMMAND=bash /entrypoint.sh,CM_ACTION=verify,VULN_ID=${CANDIDATE_ID},CANDIDATE_JSON_B64=${CANDIDATE_B64},CM_MODEL=${CM_MODEL},WIZ_SECRET_NAME=${WIZ_SECRET},GITHUB_TOKEN=${CALLER_TOKEN},CM_DISABLE_SANDBOX=true,ADDITIONAL_LOGGING=${ADDITIONAL_LOGGING},LOG_LEVEL=${LOG_LEVEL},CM_MOCK_FINDINGS=${MOCK_FINDINGS}")
+          echo "Started Cloud Run verification execution: ${EXECUTION}"
+          echo "::endgroup::"
+
+          START_TIME=$(date +%s)
+          TAIL_PID=""
+          TAIL_ACTIVE=false
+          JOB_RUNNING="false"
+
+          if [ "${STREAM_LOGS}" = "true" ]; then
+            echo "Streaming Cloud Run logs for ${EXECUTION} (waiting for container initialization)..."
+            PYTHONUNBUFFERED=1 stdbuf -oL -eL gcloud beta run jobs executions logs tail "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" 2>&1 &
+            TAIL_PID=$!
+            TAIL_ACTIVE=true
+          else
+            echo "Log streaming disabled. Monitoring execution progress for ${EXECUTION}..."
+          fi
+
+          EXIT_CODE=0
+          LOOP_COUNT=0
+          while true; do
+            LOOP_COUNT=$((LOOP_COUNT + 1))
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
+
+            if [ "${TAIL_ACTIVE}" = "true" ] && [ -n "${TAIL_PID}" ] && ! kill -0 "${TAIL_PID}" 2>/dev/null; then
+              TAIL_ACTIVE=false
+              echo "[workflow] Log tailing process completed for ${EXECUTION}."
+            fi
+
+            DESC_JSON=$(gcloud run jobs executions describe "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" \
+              --format=json 2>/dev/null || echo "{}")
+            IS_DONE=$(echo "${DESC_JSON}" | jq -r '.status.conditions[]? | select(.type=="Completed") | .status // empty')
+            if [ "${IS_DONE}" = "True" ]; then
+              echo "Execution ${EXECUTION} completed successfully (${ELAPSED}s elapsed)."
+              break
+            elif [ "${IS_DONE}" = "False" ]; then
+              echo "Execution ${EXECUTION} failed (${ELAPSED}s elapsed)."
+              EXIT_CODE=1
+              break
+            fi
+
+            IS_RUNNING=$(echo "${DESC_JSON}" | jq -r '
+              if ((.status.runningCount // 0) > 0) or any(.status.conditions[]?; .type == "Completed" and (.reason == "TasksRunning" or .reason == "Running")) then
+                "true"
+              else
+                "false"
+              end
+            ')
+
+            if [ "${JOB_RUNNING}" != "true" ] && [ "${IS_RUNNING}" = "true" ]; then
+              JOB_RUNNING="true"
+              if [ "${STREAM_LOGS}" != "true" ]; then
+                echo "⏳ [Progress] Execution in progress... (${ELAPSED}s elapsed)"
+              else
+                echo "Cloud Run job is now running (${ELAPSED}s elapsed)."
+              fi
+            elif [ $((LOOP_COUNT % 3)) -eq 1 ]; then
+              if [ "${JOB_RUNNING}" = "true" ]; then
+                if [ "${STREAM_LOGS}" != "true" ]; then
+                  echo "⏳ [Progress] Execution in progress... (${ELAPSED}s elapsed)"
+                fi
+              else
+                echo "⏳ [Progress] Provisioning Cloud Run job... (${ELAPSED}s elapsed)"
+              fi
+            fi
+
+            sleep 5
+          done
+
+          if [ -n "${TAIL_PID}" ]; then
+            sleep 5
+            kill "${TAIL_PID}" 2>/dev/null || true
+            wait "${TAIL_PID}" 2>/dev/null || true
+          fi
+
+          if [ ${EXIT_CODE} -ne 0 ]; then
+            echo "::group::Failure Execution Logs"
+            gcloud beta run jobs executions logs read "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" --limit=200 2>&1 || true
+            echo "::endgroup::"
+          elif [ "${STREAM_LOGS}" != "true" ] && [ "${ADDITIONAL_LOGGING}" = "true" ]; then
+            echo "::group::Execution Logs"
+            gcloud beta run jobs executions logs read "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" --limit=200 2>&1 || true
+            echo "::endgroup::"
+          fi
+
+          exit ${EXIT_CODE}
+
+  plan-remediation:
+    name: "Plan Remediation Matrix"
+    if: inputs.action == 'remediate'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - name: Fetch Issue Context & Generate Matrix
+        id: plan
+        shell: bash
+        env:
+          RAW_BODY: ${{ github.event.issue.body || github.event.pull_request.body || '' }}
+          RAW_COMMENT: ${{ github.event.comment.body || '' }}
+          ISSUE_NUM: ${{ github.event.issue.number || github.event.pull_request.number || '' }}
+          INPUT_VULN_ID: ${{ inputs.vuln-id }}
+          REPO_NAME: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/plan_ctx
+          echo "${RAW_BODY}" > /tmp/plan_ctx/body.txt
+          echo "${RAW_COMMENT}" > /tmp/plan_ctx/comment.txt
+
+          if [ -n "${ISSUE_NUM}" ] && [ -n "${GH_TOKEN:-}" ]; then
+            [ ! -s /tmp/plan_ctx/body.txt ] && gh issue view "${ISSUE_NUM}" --repo "${REPO_NAME}" --json body -q .body > /tmp/plan_ctx/body.txt 2>/dev/null || true
+            gh issue view "${ISSUE_NUM}" --repo "${REPO_NAME}" --json comments -q '.comments[].body' >> /tmp/plan_ctx/comment.txt 2>/dev/null || true
+          fi
+
+          MATRIX_JSON=$(python3 - <<'PYEOF'
+          import base64, hashlib, json, os, re
+
+          def clean_path(p):
+              p = re.sub(r"^(?:[ab]/|\./|/workspace/repo/|/workspace/)+", "", (p or "").strip().strip("`'\""))
+              return p.split(":")[0].strip()
+
+          def norm_sev(val):
+              s = str(val or "HIGH").upper().strip()
+              return s if s in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"} else "HIGH"
+
+          def extract_json(text):
+              out = []
+              for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, re.I):
+                  try: out.append(json.loads(m.group(1).strip()))
+                  except Exception: pass
+              dec = json.JSONDecoder()
+              i = 0
+              while i < len(text):
+                  if text[i] in "[{":
+                      try:
+                          obj, end = dec.raw_decode(text, i)
+                          out.append(obj)
+                          i = end
+                          continue
+                      except Exception: pass
+                  i += 1
+              return out
+
+          repo = os.environ.get("REPO_NAME", "")
+          vuln_filter = os.environ.get("INPUT_VULN_ID", "").strip()
+          body = open("/tmp/plan_ctx/body.txt", encoding="utf-8", errors="replace").read() if os.path.exists("/tmp/plan_ctx/body.txt") else ""
+          comment = open("/tmp/plan_ctx/comment.txt", encoding="utf-8", errors="replace").read() if os.path.exists("/tmp/plan_ctx/comment.txt") else ""
+          combined = f"{body}\n{comment}"
+
+          items = []
+          for cand in extract_json(combined):
+              ar = cand.get("actionResult") or cand.get("action_result") if isinstance(cand, dict) else None
+              container = ar if isinstance(ar, dict) else cand
+              so = container.get("structuredOutput") or container.get("structured_output") if isinstance(container, dict) else None
+              seq = so if isinstance(so, list) else [so] if isinstance(so, dict) else (
+                  cand if isinstance(cand, list) else (cand.get("findings") or cand.get("vulnerabilities") or [cand]) if isinstance(cand, dict) else []
+              )
+              for row in seq:
+                  if isinstance(row, dict) and (row.get("file_path") or row.get("filePath") or row.get("file") or row.get("path")):
+                      items.append(row)
+
+          grouped = {}
+          for idx, item in enumerate(items):
+              fp = clean_path(item.get("file_path") or item.get("filePath") or item.get("file") or item.get("path") or "")
+              if not fp:
+                  continue
+              owner = str(item.get("owner") or item.get("assignee") or "unassigned").strip().lstrip("@") or "unassigned"
+              line = int(item.get("line") or item.get("start_line") or 1)
+              sev = norm_sev(item.get("severity"))
+              title = str(item.get("title") or item.get("vuln_type") or f"Security issue in {fp}").strip()
+              msg = str(item.get("message") or item.get("description") or title).strip()
+              rec = str(item.get("recommended_fixes") or item.get("remediation") or "").strip()
+              fid = str(item.get("id") or item.get("finding_id") or hashlib.sha256(f"{repo}:{fp}:{line}:{title}".encode()).hexdigest()[:16])
+              if vuln_filter and vuln_filter not in fid:
+                  continue
+              key = (owner, fp)
+              grouped.setdefault(key, []).append({
+                  "id": fid, "file_path": fp, "line": line, "severity": sev,
+                  "title": title, "message": msg, "description": msg,
+                  "vuln_type": str(item.get("vuln_type") or "Security Vulnerability"),
+                  "recommended_fixes": rec, "owner": owner,
+              })
+
+          matrix = []
+          for r_idx, ((owner, fp), flist) in enumerate(grouped.items(), start=1):
+              primary = flist[0]
+              rid = f"r{r_idx}"
+              safe_owner = re.sub(r"[^a-zA-Z0-9_-]", "-", owner).strip("-") or "unassigned"
+              branch = f"codemender/patch-{safe_owner}-{rid}-{primary['id'][:8]}"
+              merged_fixes = "\n\n".join(f["recommended_fixes"] for f in flist if f.get("recommended_fixes"))
+              payload_b64 = base64.b64encode(json.dumps(flist).encode()).decode()
+              rec_b64 = base64.b64encode(merged_fixes.encode()).decode()
+              matrix.append({
+                  "runner_id": rid,
+                  "runner_branch": branch,
+                  "owner": owner,
+                  "file_path": fp,
+                  "finding_id": primary["id"],
+                  "short_id": primary["id"][:8],
+                  "severity": primary["severity"],
+                  "title": primary["title"],
+                  "finding_json_b64": payload_b64,
+                  "recommended_fixes_b64": rec_b64,
+              })
+          print(json.dumps(matrix))
+          PYEOF
+          )
+
+          COUNT=$(echo "${MATRIX_JSON}" | jq -r 'length')
+          {
+            echo "count=${COUNT}"
+            echo "matrix<<EOF"
+            echo "${MATRIX_JSON}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+  run-slim-remediate:
+    name: "Remediate: ${{ matrix.task.short_id }} (${{ matrix.task.owner }} - ${{ matrix.task.file_path }})"
+    needs: plan-remediation
+    if: needs.plan-remediation.outputs.count > 0
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        task: ${{ fromJson(needs.plan-remediation.outputs.matrix) }}
+      max-parallel: 10
+      fail-fast: false
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_SA_KEY == '' && (inputs.wif-provider || vars.WIF_PROVIDER || secrets.WIF_PROVIDER) || '' }}
+          service_account: ${{ secrets.GCP_SA_KEY == '' && (inputs.wif-service-account || vars.WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT) || '' }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ inputs.project-id }}
+          install_components: ${{ inputs.stream-logs && 'beta,log-streaming' || 'beta' }}
+
+      - name: Execute Cloud Run Remediation Job
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+          PROJECT: ${{ inputs.project-id || vars.GCP_PROJECT }}
+          REGION: ${{ inputs.region || vars.GCP_REGION || 'us-central1' }}
+          CHANNEL: ${{ inputs.channel || 'stable' }}
+          JOB_NAME: ${{ inputs.channel == 'experimental' && (inputs.experimental-job-name || format('{0}-experimental', inputs.job-name)) || inputs.job-name }}
+          REPO_NAME: ${{ github.repository }}
+          CM_MODEL: ${{ inputs.cm-model }}
+          WIZ_SECRET: ${{ inputs.wiz-secret-name }}
+          TARGET_REF: ${{ inputs.target-ref || github.head_ref || github.ref_name }}
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch || 'main' }}
+          ISSUE_NUM: ${{ github.event.issue.number || github.event.pull_request.number || '' }}
+          CALLER_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+          TASK_FINDING_ID: ${{ matrix.task.finding_id }}
+          TASK_RUNNER_ID: ${{ matrix.task.runner_id }}
+          TASK_RUNNER_BRANCH: ${{ matrix.task.runner_branch }}
+          TASK_FINDING_B64: ${{ matrix.task.finding_json_b64 }}
+          TASK_REC_FIXES_B64: ${{ matrix.task.recommended_fixes_b64 }}
+          TASK_OWNER: ${{ matrix.task.owner || '' }}
+          STREAM_LOGS: ${{ inputs.stream-logs }}
+          ADDITIONAL_LOGGING: ${{ inputs.additional-logging }}
+        run: |
+          set -euo pipefail
+          LOG_LEVEL="INFO"
+          if [ "${ADDITIONAL_LOGGING}" = "true" ]; then
+            LOG_LEVEL="DEBUG"
+          fi
+
+          if [ "${CHANNEL}" != "stable" ] && [ "${CHANNEL}" != "experimental" ]; then
+            echo "::error::Invalid channel '${CHANNEL}' (expected stable|experimental)"; exit 1
+          fi
+          if ! gcloud run jobs describe "${JOB_NAME}" --project="${PROJECT}" --region="${REGION}" --format="value(metadata.name)" >/dev/null 2>&1; then
+            if [ "${CHANNEL}" = "experimental" ]; then
+              echo "::error::Experimental Cloud Run job '${JOB_NAME}' not found in ${PROJECT}/${REGION}. Create it once by cloning your stable job (README: 'Experimental worker channel')."
+            else
+              echo "::error::Cloud Run job '${JOB_NAME}' not found in ${PROJECT}/${REGION}. Check job-name/project-id/region or re-run setup.sh."
+            fi
+            exit 1
+          fi
+          echo "Using ${CHANNEL} worker job: ${JOB_NAME}"
+          echo "- Worker channel: \`${CHANNEL}\` (job \`${JOB_NAME}\`)" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::group::Triggering Cloud Run Remediation Job Execution"
+          EXECUTION=$(gcloud run jobs execute "${JOB_NAME}" \
+            --project="${PROJECT}" \
+            --region="${REGION}" \
+            --async \
+            --format="value(metadata.name)" \
+            --args="REPO=${REPO_NAME},PROJECT_ID=${PROJECT},GCP_PROJECT=${PROJECT},REF=${TARGET_REF},BASE_REF=${BASE_REF},COMMAND=bash /entrypoint.sh,CM_ACTION=remediate,MODE=fix,VULN_ID=${TASK_FINDING_ID},RUNNER_ID=${TASK_RUNNER_ID},RUNNER_BRANCH=${TASK_RUNNER_BRANCH},ISSUE_NUMBER=${ISSUE_NUM},ISSUE_BODY_B64=${TASK_FINDING_B64},RECOMMENDED_FIXES_B64=${TASK_REC_FIXES_B64},OWNER=${TASK_OWNER},CM_MODEL=${CM_MODEL},WIZ_SECRET_NAME=${WIZ_SECRET},GITHUB_TOKEN=${CALLER_TOKEN},CM_DISABLE_SANDBOX=true,ADDITIONAL_LOGGING=${ADDITIONAL_LOGGING},LOG_LEVEL=${LOG_LEVEL}")
+          echo "Started Cloud Run remediation execution: ${EXECUTION}"
+          echo "::endgroup::"
+
+          START_TIME=$(date +%s)
+          TAIL_PID=""
+          TAIL_ACTIVE=false
+          JOB_RUNNING="false"
+
+          if [ "${STREAM_LOGS}" = "true" ]; then
+            echo "Streaming Cloud Run logs for ${EXECUTION} (waiting for container initialization)..."
+            PYTHONUNBUFFERED=1 stdbuf -oL -eL gcloud beta run jobs executions logs tail "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" 2>&1 &
+            TAIL_PID=$!
+            TAIL_ACTIVE=true
+          else
+            echo "Log streaming disabled. Monitoring execution progress for ${EXECUTION}..."
+          fi
+
+          EXIT_CODE=0
+          LOOP_COUNT=0
+          while true; do
+            LOOP_COUNT=$((LOOP_COUNT + 1))
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
+
+            if [ "${TAIL_ACTIVE}" = "true" ] && [ -n "${TAIL_PID}" ] && ! kill -0 "${TAIL_PID}" 2>/dev/null; then
+              TAIL_ACTIVE=false
+              echo "[workflow] Log tailing process completed for ${EXECUTION}."
+            fi
+
+            DESC_JSON=$(gcloud run jobs executions describe "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" \
+              --format=json 2>/dev/null || echo "{}")
+            IS_DONE=$(echo "${DESC_JSON}" | jq -r '.status.conditions[]? | select(.type=="Completed") | .status // empty')
+            if [ "${IS_DONE}" = "True" ]; then
+              echo "Execution ${EXECUTION} completed successfully (${ELAPSED}s elapsed)."
+              break
+            elif [ "${IS_DONE}" = "False" ]; then
+              echo "Execution ${EXECUTION} failed (${ELAPSED}s elapsed)."
+              EXIT_CODE=1
+              break
+            fi
+
+            IS_RUNNING=$(echo "${DESC_JSON}" | jq -r '
+              if ((.status.runningCount // 0) > 0) or any(.status.conditions[]?; .type == "Completed" and (.reason == "TasksRunning" or .reason == "Running")) then
+                "true"
+              else
+                "false"
+              end
+            ')
+
+            if [ "${JOB_RUNNING}" != "true" ] && [ "${IS_RUNNING}" = "true" ]; then
+              JOB_RUNNING="true"
+              if [ "${STREAM_LOGS}" != "true" ]; then
+                echo "⏳ [Progress] Execution in progress... (${ELAPSED}s elapsed)"
+              else
+                echo "Cloud Run job is now running (${ELAPSED}s elapsed)."
+              fi
+            elif [ $((LOOP_COUNT % 3)) -eq 1 ]; then
+              if [ "${JOB_RUNNING}" = "true" ]; then
+                if [ "${STREAM_LOGS}" != "true" ]; then
+                  echo "⏳ [Progress] Execution in progress... (${ELAPSED}s elapsed)"
+                fi
+              else
+                echo "⏳ [Progress] Provisioning Cloud Run job... (${ELAPSED}s elapsed)"
+              fi
+            fi
+
+            sleep 5
+          done
+
+          if [ -n "${TAIL_PID}" ]; then
+            sleep 5
+            kill "${TAIL_PID}" 2>/dev/null || true
+            wait "${TAIL_PID}" 2>/dev/null || true
+          fi
+
+          if [ ${EXIT_CODE} -ne 0 ]; then
+            echo "::group::Failure Execution Logs"
+            gcloud beta run jobs executions logs read "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" --limit=200 2>&1 || true
+            echo "::endgroup::"
+          elif [ "${STREAM_LOGS}" != "true" ] && [ "${ADDITIONAL_LOGGING}" = "true" ]; then
+            echo "::group::Execution Logs"
+            gcloud beta run jobs executions logs read "${EXECUTION}" \
+              --project="${PROJECT}" \
+              --region="${REGION}" --limit=200 2>&1 || true
+            echo "::endgroup::"
+          fi
+
+          exit ${EXIT_CODE}
+
+  aggregate-owner-prs:
+    name: "Aggregate & Open Consolidated PRs"
+    needs: [plan-remediation, run-slim-remediate]
+    if: always() && needs.plan-remediation.outputs.count > 0 && !contains(needs.plan-remediation.result, 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Target Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN || github.token }}
+
+      - name: Merge Runner Branches & Open Owner PRs
+        shell: bash
+        env:
+          MATRIX_JSON: ${{ needs.plan-remediation.outputs.matrix }}
+          REPO_NAME: ${{ github.repository }}
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch || 'main' }}
+          TARGET_REF: ${{ inputs.target-ref || github.head_ref || github.ref_name }}
+          ISSUE_NUM: ${{ github.event.issue.number || github.event.pull_request.number || '' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "codemender-runner[bot]"
+          git config user.email "codemender-runner[bot]@users.noreply.github.com"
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' || true
+
+          python3 - <<'PYEOF'
+          import base64, json, os, re, subprocess
+
+          def sh(cmd):
+              return subprocess.run(cmd, text=True, capture_output=True)
+
+          def clean_path(p):
+              p = re.sub(r"^(?:[ab]/|\./|/workspace/repo/|/workspace/)+", "", (p or "").strip().strip("`'\""))
+              return p.split(":")[0].strip()
+
+          def norm_sev(val):
+              s = str(val or "HIGH").upper().strip()
+              return s if s in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"} else "HIGH"
+
+          matrix = json.loads(os.environ.get("MATRIX_JSON") or "[]")
+          repo = os.environ.get("REPO_NAME", "")
+          base_ref = os.environ.get("BASE_REF", "main")
+          target_ref = os.environ.get("TARGET_REF", "main")
+          issue_num = os.environ.get("ISSUE_NUM", "").strip()
+
+          by_owner = {}
+          for task in matrix:
+              owner = str(task.get("owner") or "unassigned").strip() or "unassigned"
+              by_owner.setdefault(owner, []).append(task)
+
+          for owner, tasks in by_owner.items():
+              existing = [t for t in tasks if sh(["git", "rev-parse", "--verify", f"origin/{t['runner_branch']}"]).returncode == 0]
+              if not existing:
+                  print(f"ℹ️ No remote runner branches found for owner '{owner}'; skipping.")
+                  continue
+
+              is_unassigned = (owner == "unassigned")
+              safe_owner = re.sub(r"[^a-zA-Z0-9_-]", "-", owner).strip("-") or "unassigned"
+              agg_branch = "codemender/fix-unassigned" if is_unassigned else f"codemender/fix-owner-{safe_owner}"
+
+              # Check if aggregate branch already exists remotely (e.g. on rerun of failed jobs)
+              agg_exists_remote = (sh(["git", "rev-parse", "--verify", f"origin/{agg_branch}"]).returncode == 0)
+              if agg_exists_remote:
+                  sh(["git", "checkout", "-B", agg_branch, f"origin/{agg_branch}"])
+              else:
+                  sh(["git", "checkout", "-B", agg_branch, f"origin/{base_ref}"])
+
+              merged_tasks = []
+              for t in existing:
+                  res = sh(["git", "merge", "--no-ff", "--no-edit", "-X", "theirs", f"origin/{t['runner_branch']}"])
+                  if res.returncode == 0:
+                      merged_tasks.append(t)
+                  else:
+                      sh(["git", "merge", "--abort"])
+
+              if not merged_tasks:
+                  if not agg_exists_remote:
+                      continue
+                  print(f"ℹ️ No new tasks merged for owner '{owner}', branch already up-to-date.")
+
+              sh(["git", "push", "origin", agg_branch])
+
+              # Extract new findings from newly merged tasks
+              new_findings = []
+              for t in merged_tasks:
+                  b64 = t.get("finding_json_b64", "")
+                  if b64:
+                      try:
+                          decoded = json.loads(base64.b64decode(b64).decode("utf-8"))
+                          new_findings.extend(decoded if isinstance(decoded, list) else [decoded])
+                      except Exception:
+                          pass
+              if not new_findings:
+                  new_findings = merged_tasks
+
+              # If PR exists, read previous metadata to accumulate all findings across runs
+              prev_findings = []
+              existing_pr_body = sh(["gh", "pr", "list", "--repo", repo, "--head", agg_branch, "--state", "open", "--json", "body", "-q", ".[0].body"]).stdout
+              if existing_pr_body:
+                  meta_match = re.search(r"<!--\s*codemender-batch-metadata:\s*(\{.*?\})\s*-->", existing_pr_body)
+                  if meta_match:
+                      try:
+                          meta = json.loads(meta_match.group(1))
+                          prev_findings = meta.get("findings", [])
+                      except Exception:
+                          pass
+
+              # Deduplicate findings by finding_id / id
+              seen_ids = set()
+              all_findings = []
+              for f in (prev_findings + new_findings):
+                  fid = str(f.get("finding_id") or f.get("short_id") or f.get("id") or "")[:8]
+                  if fid and fid in seen_ids:
+                      continue
+                  if fid:
+                      seen_ids.add(fid)
+                  all_findings.append(f)
+
+              count = len(all_findings)
+              if is_unassigned:
+                  title = f"fix(security): resolve {count} CodeMender findings" if count > 1 else "fix(security): resolve CodeMender finding"
+              else:
+                  title = f"fix(security): resolve {count} CodeMender findings for @{owner}" if count > 1 else f"fix(security): resolve CodeMender finding for @{owner}"
+
+              rows = []
+              for idx, t in enumerate(all_findings, 1):
+                  t_fid = str(t.get("finding_id") or t.get("short_id") or t.get("id") or f"task-{idx}")[:8]
+                  t_sev = norm_sev(t.get("severity"))
+                  t_path = clean_path(t.get("file_path") or t.get("filePath") or t.get("file") or t.get("path") or "")
+                  t_line = int(t.get("line") or t.get("start_line") or 1)
+                  t_title = str(t.get("title") or "Security Vulnerability")
+                  t_link = f"[`{t_path}:{t_line}`](https://github.com/{repo}/blob/{base_ref}/{t_path}#L{t_line})" if t_path else "`N/A`"
+                  rows.append(f"| {idx} | **{t_sev}** | `{t_fid}` | {t_link} | {t_title} |")
+
+              details = []
+              for idx, t in enumerate(all_findings, 1):
+                  t_fid = str(t.get("finding_id") or t.get("short_id") or t.get("id") or f"task-{idx}")[:8]
+                  t_title = str(t.get("title") or "Security Vulnerability")
+                  t_msg = str(t.get("message") or t.get("description") or "")
+                  t_rec = str(t.get("recommended_fixes") or "")
+                  details.append(f"#### {idx}. `{t_fid}`: {t_title}")
+                  if t_msg:
+                      details.append(f"- **Summary:** {t_msg}")
+                  if t_rec:
+                      details.append(f"- **Applied Guidance:**\n```\n{t_rec}\n```")
+                  details.append("")
+
+              # Store compact metadata for future reruns
+              clean_meta_findings = [
+                  {
+                      "id": str(f.get("finding_id") or f.get("short_id") or f.get("id") or "")[:8],
+                      "title": str(f.get("title") or ""),
+                      "severity": norm_sev(f.get("severity")),
+                      "file_path": clean_path(f.get("file_path") or f.get("filePath") or f.get("file") or f.get("path") or ""),
+                      "line": int(f.get("line") or f.get("start_line") or 1),
+                      "message": str(f.get("message") or f.get("description") or ""),
+                      "recommended_fixes": str(f.get("recommended_fixes") or "")[:500],
+                  }
+                  for f in all_findings
+              ]
+              meta_json = json.dumps({"count": count, "owner": owner, "findings": clean_meta_findings})
+
+              body_lines = [
+                  f'<!-- codemender-batch-metadata: {meta_json} -->\n',
+                  "## 🛡️ CodeMender Automated Security Remediation (Aggregated Draft)\n",
+              ]
+              if issue_num:
+                  body_lines.append(f"> **Closes #{issue_num}**\n")
+              if not is_unassigned:
+                  body_lines.append(f"**Assigned Reviewer:** @{owner}\n")
+
+              body_lines.extend([
+                  "### 📋 Remediated Security Findings\n",
+                  "| # | Severity | Finding ID | Target Location | Vulnerability Title |",
+                  "| :--- | :--- | :--- | :--- | :--- |",
+                  *rows,
+                  "",
+                  "---",
+                  "",
+                  "### 🔍 Remediation Details",
+                  "",
+                  *details,
+                  "---",
+                  "*Draft Pull Request automatically consolidated and opened by CodeMender Orchestrator.*",
+              ])
+
+              pr_body_path = f"/tmp/pr_body_{safe_owner}.md"
+              with open(pr_body_path, "w", encoding="utf-8") as bf:
+                  bf.write("\n".join(body_lines))
+
+              existing_pr = sh(["gh", "pr", "list", "--repo", repo, "--head", agg_branch, "--state", "open", "--json", "number", "-q", ".[0].number"]).stdout.strip()
+              if existing_pr:
+                  pr_res = sh(["gh", "pr", "edit", existing_pr, "--repo", repo, "--title", title, "--body-file", pr_body_path])
+              else:
+                  cmd = ["gh", "pr", "create", "--repo", repo, "--base", base_ref, "--head", agg_branch, "--title", title, "--body-file", pr_body_path, "--draft"]
+                  if not is_unassigned:
+                      cmd.extend(["--assignee", owner])
+                  pr_res = sh(cmd)
+              print(pr_res.stdout or pr_res.stderr)
+
+              for t in existing:
+                  sh(["git", "push", "origin", "--delete", t["runner_branch"]])
+          PYEOF

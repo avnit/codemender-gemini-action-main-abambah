@@ -1,0 +1,85 @@
+name: Build & Publish CodeMender Worker (Slim)
+
+on:
+  schedule:
+    - cron: "0 4 * * 1,4" # Twice-weekly rebuild (Mon & Thu at 04:00 UTC) to track latest CodeMender CLI release
+  workflow_dispatch:
+  push:
+    paths:
+      - "worker/**"
+      - ".github/workflows/deploy-worker.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-publish:
+    name: Build & Publish Container to Artifact Registry
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_SA_KEY == '' && secrets.WIF_PROVIDER || '' }}
+          service_account: ${{ secrets.GCP_SA_KEY == '' && secrets.WIF_SERVICE_ACCOUNT || '' }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT }}
+
+      - name: Configure Docker for Artifact Registry
+        shell: bash
+        run: |
+          REGION="${{ vars.GCP_REGION }}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build & Push Slim Worker Container
+        shell: bash
+        env:
+          PROJECT: ${{ vars.GCP_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+          AR_REPO: ${{ vars.AR_REPO }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            CHANNEL="stable"
+            TAG="slim"
+          else
+            CHANNEL="experimental"
+            TAG="slim-experimental"
+          fi
+          IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT}/${AR_REPO}/worker:${TAG}"
+          IMAGE_SHA="${REGION}-docker.pkg.dev/${PROJECT}/${AR_REPO}/worker:${{ github.sha }}"
+
+          echo "🔨 Building slim container (${CHANNEL})..."
+          docker build -f worker/Dockerfile -t "${IMAGE_URI}" -t "${IMAGE_SHA}" .
+
+          echo "📤 Publishing image to Artifact Registry..."
+          docker push "${IMAGE_URI}"
+          docker push "${IMAGE_SHA}"
+
+          echo "✅ Published container images successfully:"
+          echo "   Floating:  ${IMAGE_URI}"
+          echo "   Immutable: ${IMAGE_SHA}"
+
+          # Cloud Run jobs pin the image digest at deploy time; existing jobs
+          # keep running the old image until they are updated manually.
+          JOB_HINT="<job-name>"
+          [ "${CHANNEL}" = "experimental" ] && JOB_HINT="<job-name>-experimental"
+          {
+            echo "### Worker image published (${CHANNEL})"
+            echo "- Ref: \`${{ github.ref_name }}\` @ \`${{ github.sha }}\`"
+            echo "- Floating: \`${IMAGE_URI}\`"
+            echo "- Immutable: \`${IMAGE_SHA}\`"
+            echo ""
+            echo "Cloud Run jobs do **not** pick up new images automatically. To roll this image onto a job:"
+            echo '```bash'
+            echo "gcloud run jobs update ${JOB_HINT} --image=${IMAGE_URI} --project=<consumer-project> --region=<region>"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

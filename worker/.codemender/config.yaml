@@ -1,0 +1,71 @@
+# ==============================================================================
+# CodeMender CLI Configuration (Version Controlled)
+# ==============================================================================
+
+server: {}
+
+model: "gemini-4-argon"
+
+sandbox:
+  enabled: false
+
+scan:
+  extensions:
+    include:
+      - ".py"
+      - ".java"
+      - ".go"
+      - ".js"
+      - ".ts"
+      - ".tsx"
+      - ".json"
+      - ".css"
+      - ".env"
+      - ".lock"
+      - ".md"
+      - ".mod"
+      - ".sh"
+      - ".sql"
+      - ".sum"
+      - ".toml"
+      - ".yaml"
+      - ".yml"
+      - ".c"
+      - ".cc"
+      - ".cpp"
+      - ".h"
+      - ".rb"
+      - ".php"
+      - ".clj"
+      - ".edn"
+    exclude:
+      - ".min.js"
+      - ".generated.go"
+      - ".pb.go"
+  max_file_size_kb: 500
+  incremental: false
+
+project_paths:
+  - "."
+  - "/workspace/repo"
+  - "/tmp"
+  - "/workspace/artifacts"
+
+output:
+  format: table
+
+tools:
+  confirm_commands: false
+  confirm_writes: false
+
+vcs:
+  type: "git"
+  commands:
+    reset: "git checkout HEAD -- ."
+    diff: ""
+    status: ""
+    stage: ""
+    branch_cleanup: 'git branch | grep "cm-{session_id}-" | xargs -r git branch -D 2>/dev/null || true'
+
+build:
+  command: ""

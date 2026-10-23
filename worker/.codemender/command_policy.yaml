@@ -1,0 +1,18 @@
+# ==============================================================================
+# CodeMender Command Policy (Allowed CLI Execution Commands)
+# ==============================================================================
+allowed_commands:
+  - "curl"
+  - "wget"
+  - "cm"
+  - "git"
+  - "gh"
+  - "npm"
+  - "pytest"
+  - "python3"
+  - "node"
+  - "make"
+  - "go"
+  - "apt-get"
+  - "apt"
+  - "dpkg"

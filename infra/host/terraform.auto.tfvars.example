@@ -1,0 +1,11 @@
+project_id             = "your-gcp-project-id"
+region                 = "us-central1"
+artifact_registry_repo = "codemender-workers"
+builder_sa_name        = "codemender-slim-builder"
+github_repo            = "wiz-demo/codemender-gemini-action"
+wif_pool_name          = "codemender-pool"
+wif_provider_name      = "github-provider"
+create_wif             = true
+create_ar_repo         = true
+public_read            = false
+authorized_pull_members = []
